@@ -14,6 +14,11 @@ _start:
 
 	// If execution reaches here, it is the boot core. Now, prepare the jump to Rust code.
 
+	// Under the Linux boot protocol x0 holds the device tree's physical
+	// address; keep it before x0 is reused below.
+	adrp	x5, {BOOT_DTB}
+	str	x0, [x5, #:lo12:{BOOT_DTB}]
+
 	// This loads the physical address of the stack end. For details see
 	// https://github.com/rust-embedded/rust-raspberrypi-OS-tutorials/blob/master/16_virtual_mem_part4_higher_half_kernel/src/bsp/raspberrypi/link.ld
 	adrp	x4, {BOOT_STACK}

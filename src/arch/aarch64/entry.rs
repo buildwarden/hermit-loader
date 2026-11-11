@@ -13,11 +13,23 @@ use crate::stack::STACK;
 /// Number of virtual address bits for 4KB page
 const VA_BITS: u64 = 48;
 
+/// The device tree address the boot protocol passed in `x0`, or 0.
+///
+/// Written by `entry.s` before any Rust code runs. It lives in `.data`, not
+/// `.bss`, so it holds its value even where the image is loaded as a flat
+/// binary that nothing zeroes.
+#[unsafe(link_section = ".data")]
+pub(super) static mut BOOT_DTB: u64 = 0;
+
 global_asm!(
 	include_str!("entry.s"),
 	BOOT_STACK = sym STACK,
+	BOOT_DTB = sym BOOT_DTB,
 	start_rust = sym start_rust,
 );
+
+#[cfg(feature = "vz")]
+global_asm!(include_str!("head.s"));
 
 #[inline(never)]
 pub unsafe fn start_rust() -> ! {

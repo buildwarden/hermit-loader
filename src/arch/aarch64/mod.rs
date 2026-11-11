@@ -23,24 +23,73 @@ use crate::os::CONSOLE;
 use crate::{BootInfoExt, stack};
 
 /// start address of the RAM at Qemu's virt emulation
+#[cfg(not(feature = "vz"))]
 const RAM_START: u64 = 0x40000000;
-/// Qemu assumes for ELF kernel that the fdt is located at
-/// start of RAM (0x4000_0000)
-/// see <https://qemu.readthedocs.io/en/latest/system/arm/virt.html>
-const DEVICE_TREE: u64 = RAM_START;
+/// start address of the RAM on Apple's Virtualization framework
+#[cfg(feature = "vz")]
+const RAM_START: u64 = 0x70000000;
 
-pub unsafe fn get_memory(_memory_size: u64) -> u64 {
-	let loader_end = elf_symbols::executable_end();
-	(loader_end.expose_provenance() as u64).align_up(LargePageSize::SIZE as u64)
+/// The device tree the loader and the kernel use: the copy made by
+/// [`get_memory`] once it exists, else the one the boot protocol passed in
+/// `x0`, else start of RAM, where Qemu places it for ELF kernels
+/// (see <https://qemu.readthedocs.io/en/latest/system/arm/virt.html>).
+#[unsafe(link_section = ".data")]
+static mut DEVICE_TREE_COPY: u64 = 0;
+
+fn device_tree() -> u64 {
+	let copy = unsafe { DEVICE_TREE_COPY };
+	let boot = unsafe { entry::BOOT_DTB };
+	if copy != 0 {
+		copy
+	} else if boot != 0 {
+		boot
+	} else {
+		RAM_START
+	}
+}
+
+fn fdt() -> Fdt<'static> {
+	unsafe {
+		Fdt::from_ptr(ptr::with_exposed_provenance(device_tree() as usize))
+			.expect(".fdt file has invalid header")
+	}
+}
+
+/// Returns where to load the kernel, after the loader.
+///
+/// The device tree is first copied to just below that address. The kernel
+/// reserves all memory below itself, and the loader's page tables map it, so
+/// the copy survives wherever the boot protocol placed the original (VZ puts
+/// it near the top of RAM, unmapped and unreserved). The range skips the
+/// initrd if it would overlap it, since the kernel is still read from there.
+pub unsafe fn get_memory(memory_size: u64) -> u64 {
+	let loader_end = elf_symbols::executable_end().expose_provenance() as u64;
+	let fdt_size = fdt().total_size() as u64;
+
+	let mut start = loader_end.align_up(BasePageSize::SIZE as u64);
+	let need = fdt_size + LargePageSize::SIZE as u64 + memory_size;
+	let initrd = find_kernel().as_ptr_range();
+	let (initrd_start, initrd_end) = (initrd.start as u64, initrd.end as u64);
+	if initrd_start < start + need && start < initrd_end {
+		start = initrd_end.align_up(BasePageSize::SIZE as u64);
+	}
+
+	let copy = start;
+	unsafe {
+		ptr::copy_nonoverlapping(
+			ptr::with_exposed_provenance::<u8>(device_tree() as usize),
+			ptr::with_exposed_provenance_mut::<u8>(copy as usize),
+			fdt_size as usize,
+		);
+		DEVICE_TREE_COPY = copy;
+	}
+	info!("Device tree copied to {copy:#x} ({fdt_size:#x} B)");
+
+	(copy + fdt_size).align_up(LargePageSize::SIZE as u64)
 }
 
 pub fn find_kernel() -> &'static [u8] {
-	let fdt = unsafe {
-		Fdt::from_ptr(ptr::with_exposed_provenance(DEVICE_TREE as usize))
-			.expect(".fdt file has invalid header")
-	};
-
-	fdt.find_kernel().unwrap()
+	fdt().find_kernel().unwrap()
 }
 
 #[allow(static_mut_refs)] // FIXME: disallow
@@ -50,30 +99,25 @@ pub unsafe fn boot_kernel(kernel_info: LoadedKernel) -> ! {
 		entry_point,
 	} = kernel_info;
 
-	let fdt = unsafe {
-		Fdt::from_ptr(ptr::with_exposed_provenance(DEVICE_TREE as usize))
-			.expect(".fdt file has invalid header")
-	};
+	let fdt = fdt();
 	let cpus = fdt.cpus().count();
 	info!("Detect {cpus} CPU(s)");
 
+	// 0 when the device tree names no UART (VZ has none): nothing is mapped
+	// and the kernel gets no serial port.
 	let uart_address: u32 = CONSOLE.lock().get().get_stdout();
 	info!("Detect UART at {uart_address:#x}");
 
-	unsafe {
-		page_tables::init(uart_address);
+	if uart_address != 0 {
+		unsafe {
+			page_tables::init(uart_address);
+		}
+		CONSOLE.lock().get().set_stdout(0x1000);
 	}
-
-	CONSOLE.lock().get().set_stdout(0x1000);
 
 	unsafe {
 		page_tables::enable();
 	}
-
-	let fdt = unsafe {
-		Fdt::from_ptr(ptr::with_exposed_provenance(DEVICE_TREE as usize))
-			.expect(".fdt file has invalid header")
-	};
 
 	if let Some(device_type) = fdt
 		.find_node("/memory")
@@ -93,8 +137,12 @@ pub unsafe fn boot_kernel(kernel_info: LoadedKernel) -> ! {
 	let boot_info = BootInfo {
 		hardware_info: HardwareInfo {
 			phys_addr_range: ram_start..ram_start + ram_size,
-			serial_port_base: SerialPortBase::new(0x1000),
-			device_tree: core::num::NonZeroU64::new(DEVICE_TREE),
+			serial_port_base: if uart_address != 0 {
+				SerialPortBase::new(0x1000)
+			} else {
+				None
+			},
+			device_tree: core::num::NonZeroU64::new(device_tree()),
 		},
 		load_info,
 		platform_info: PlatformInfo::LinuxBoot,

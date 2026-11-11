@@ -26,6 +26,25 @@ pub trait SerialDriver {
 pub enum SerialPort {
 	Qemu(QemuSerial),
 	Xlnx(XlnxSerial),
+	Null(NullSerial),
+}
+
+/// A console that discards everything, for machines without a UART.
+///
+/// Its address is 0, which tells `boot_kernel` to map no UART and pass the
+/// kernel no serial port.
+pub struct NullSerial;
+
+impl SerialDriver for NullSerial {
+	fn init(&mut self) {}
+	fn putc(&mut self, c: u8) -> SerialSuccess<u8> {
+		SerialSuccess::Success(c)
+	}
+	fn putstr(&mut self, _s: &[u8]) {}
+	fn get_addr(&self) -> u32 {
+		0
+	}
+	fn wait_empty(&mut self) {}
 }
 
 pub fn get_device<'a>(node: FdtNode<'_, 'a>) -> Option<SerialPort> {

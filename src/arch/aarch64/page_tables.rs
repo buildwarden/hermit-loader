@@ -27,12 +27,19 @@ static mut LEVEL_1_TABLE: PageTable = {
 	table[0] = (&raw mut LEVEL_2_TABLE_SERIAL)
 		.wrapping_byte_add(descr::NORMAL)
 		.cast();
-	table[1] = (&raw mut LEVEL_2_TABLE_RAM)
+	table[RAM_L1_INDEX] = (&raw mut LEVEL_2_TABLE_RAM)
 		.wrapping_byte_add(descr::NORMAL)
 		.cast();
 
 	PageTable(table)
 };
+
+/// Where RAM_START falls in the identity map: the 1 GiB level 1 slot, and
+/// the first 2 MiB level 2 slot within it (0 on Qemu's virt at 0x4000_0000,
+/// 384 on VZ at 0x7000_0000).
+const RAM_L1_INDEX: usize = (RAM_START >> 30) as usize;
+const RAM_L2_INDEX: usize = ((RAM_START >> 21) & 0x1ff) as usize;
+const _: () = assert!(RAM_L1_INDEX == 1 && RAM_L2_INDEX + 10 <= 512);
 
 static mut LEVEL_2_TABLE_SERIAL: PageTable = {
 	let mut table = [ptr::null_mut(); _];
@@ -49,7 +56,7 @@ static mut LEVEL_2_TABLE_RAM: PageTable = {
 
 	let mut entry_i = 0;
 	while entry_i < 10usize {
-		let entry = &mut table[entry_i];
+		let entry = &mut table[RAM_L2_INDEX + entry_i];
 
 		let level_3_table = unsafe { &raw mut LEVEL_3_TABLES_RAM[entry_i] };
 		*entry = level_3_table.wrapping_byte_add(descr::NORMAL).cast();

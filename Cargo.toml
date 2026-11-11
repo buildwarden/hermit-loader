@@ -54,6 +54,8 @@ elf = []
 linux = []
 multiboot = []
 sbi = []
+## Boot as an arm64 Linux Image on Apple's Virtualization framework (VZ).
+vz = ["elf"]
 x86_64-linux = ["linux", "dep:linux-boot-params"]
 x86_64-multiboot = ["multiboot", "dep:multiboot"]
 
